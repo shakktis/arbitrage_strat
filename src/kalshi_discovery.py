@@ -1,3 +1,4 @@
+# src/kalshi_discovery.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
@@ -9,30 +10,60 @@ def _get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 
     return r.json()
 
 def list_series(base_url: str) -> List[Dict[str, Any]]:
-    # Docs: GET /series returns a list of series objects (public market data). :contentReference[oaicite:5]{index=5}
     data = _get_json(f"{base_url}/series")
     return data.get("series", [])
 
-def choose_fed_series(series: List[Dict[str, Any]]) -> str:
-    # Score by title keywords
-    keywords = ["fomc", "fed", "federal reserve", "interest rate", "fed funds"]
-    best = None
+def rank_fomc_series(base_url: str, top_n: int = 12) -> List[str]:
+    series = list_series(base_url)
+
+    all_tickers = []
     for s in series:
-        title = (s.get("title") or "").lower()
-        ticker = s.get("ticker") or ""
+        t = (s.get("ticker") or "").strip()
+        if t:
+            all_tickers.append(t)
+
+    # Hard-pin the one we KNOW is the Fed decision series
+    pinned = []
+    if "KXFEDDECISION" in all_tickers:
+        pinned.append("KXFEDDECISION")
+
+    weights = {
+        "kxfeddecision": 999,     # if it appears in text anywhere, slam-dunk it
+        "fomc": 50,
+        "fed decision": 40,
+        "rate decision": 35,
+        "federal open market": 30,
+        "meeting": 20,
+        "decision": 20,
+        "target rate": 15,
+        "federal reserve": 10,
+        "fed funds": 10,
+        "interest rate": 8,
+        "policy rate": 8,
+        "kxfed": 25,              # favour tickers that look like KX Fed series
+    }
+
+    scored: List[Tuple[int, str]] = []
+    for s in series:
+        ticker = (s.get("ticker") or "").strip()
+        title = (s.get("title") or "").strip()
         if not ticker:
             continue
-        score = 0
-        for kw in keywords:
-            if kw in title:
-                score += 1
-        if score > 0:
-            if best is None or score > best[0]:
-                best = (score, ticker, s.get("title") or "")
-    if best is None:
-        raise RuntimeError("Could not auto-find a Fed/FOMC-related Kalshi series. You may need to set it manually.")
-    return best[1]
 
-def auto_find_fed_series_ticker(base_url: str) -> str:
-    series = list_series(base_url)
-    return choose_fed_series(series)
+        text = (title + " " + ticker).lower()
+        score = 0
+        for kw, w in weights.items():
+            if kw in text:
+                score += w
+
+        # extra boost for tickers that start with KXFED (often the macro series)
+        if ticker.lower().startswith("kxfed"):
+            score += 30
+
+        if score > 0:
+            scored.append((score, ticker))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    ranked = pinned + [t for _, t in scored if t not in pinned]
+    return ranked[:top_n]
